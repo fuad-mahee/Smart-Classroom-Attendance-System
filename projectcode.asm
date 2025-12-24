@@ -7,6 +7,7 @@
 MAX_STUDENTS     EQU 10
 LATE_THRESHOLD   EQU 91      ; ~5 seconds (18.2 ticks/sec)
 BUFFER_TIME      EQU 182     ; ~10 seconds for undo security
+UNDO_TIME_LIMIT  EQU 546     ; ~30 seconds (18.2 ticks/sec) for undo without confirmation
 STACK_SIZE       EQU 20
 
 ; ==================== AUTHENTICATION DATA ====================
@@ -60,6 +61,7 @@ session_start    DW 0
 current_day      DB 1
 total_classes    DB 10
 roll_call_start  DW 0
+roll_call_end_time DW 0     ; Time when roll call completed
 
 ; ==================== ACTIVE POOL FOR VIVA ====================
 active_pool      DB 10 DUP(0)
@@ -108,6 +110,8 @@ undo_id_prompt   DB 0Dh, 0Ah, "Enter Student ID to change status: $"
 undo_status_prompt DB 0Dh, 0Ah, "Select new status: [0] Absent, [1] Present, [2] Late: $"
 undo_invalid_id  DB 0Dh, 0Ah, "Invalid Student ID!", 0Dh, 0Ah, "$"
 undo_invalid_status DB 0Dh, 0Ah, "Invalid status! Please enter 0, 1, or 2.", 0Dh, 0Ah, "$"
+undo_confirm_msg DB 0Dh, 0Ah, "WARNING: More than 30 seconds since roll call. Continue? [Y/N]: $"
+undo_cancelled   DB 0Dh, 0Ah, "Undo cancelled.", 0Dh, 0Ah, "$"
 redo_success     DB 0Dh, 0Ah, "Redo Successful!", 0Dh, 0Ah, "$"
 redo_empty       DB 0Dh, 0Ah, "Nothing to Redo!", 0Dh, 0Ah, "$"
 reauth_prompt    DB "Enter password to confirm: $"
@@ -626,6 +630,11 @@ next_student:
     JNZ roll_call_loop
 
 roll_call_end:
+    ; Save roll call end time
+    MOV AH, 00h
+    INT 1Ah
+    MOV roll_call_end_time, DX
+    
     ; Calculate grades for all students after roll call
     CALL calculate_all_grades
     
@@ -801,6 +810,44 @@ push_undo_stack ENDP
 
 ; ==================== UNDO ACTION (Feature 2) ====================
 undo_action PROC
+    ; Check if roll call has been completed
+    CMP roll_call_end_time, 0
+    JE no_roll_call_done
+    
+    ; Check time since roll call ended
+    MOV AH, 00h
+    INT 1Ah
+    MOV AX, DX
+    SUB AX, roll_call_end_time
+    CMP AX, UNDO_TIME_LIMIT
+    JA undo_needs_confirm
+    
+    ; Within 30 seconds, proceed normally
+    JMP proceed_undo
+
+undo_needs_confirm:
+    ; More than 30 seconds, show confirmation
+    LEA DX, undo_confirm_msg
+    MOV AH, 09h
+    INT 21h
+    
+    ; Read confirmation
+    MOV AH, 01h
+    INT 21h
+    
+    ; Check if user confirmed (Y or y)
+    CMP AL, 'Y'
+    JE proceed_undo
+    CMP AL, 'y'
+    JE proceed_undo
+    
+    ; User cancelled
+    LEA DX, undo_cancelled
+    MOV AH, 09h
+    INT 21h
+    RET
+
+proceed_undo:
     ; Prompt for student ID
     LEA DX, undo_id_prompt
     MOV AH, 09h
@@ -847,6 +894,10 @@ undo_action PROC
     MOV AH, 09h
     INT 21h
     RET
+
+no_roll_call_done:
+    ; No roll call done yet, proceed normally
+    JMP proceed_undo
 
 set_absent:
     MOV AL, 0
