@@ -101,9 +101,13 @@ roll_end_msg     DB 0Dh, 0Ah, "Roll Call Complete!", 0Dh, 0Ah, "$"
 roll_student_id  DB 0Dh, 0Ah, "Student ID: $"
 
 ; Undo/Redo Messages
-undo_success     DB 0Dh, 0Ah, "Undo Successful! Student status reverted.", 0Dh, 0Ah, "$"
+undo_success     DB 0Dh, 0Ah, "Status changed successfully!", 0Dh, 0Ah, "$"
 undo_empty       DB 0Dh, 0Ah, "Nothing to Undo!", 0Dh, 0Ah, "$"
 undo_expired     DB 0Dh, 0Ah, "WARNING: Buffer time expired! Re-authenticate to proceed.", 0Dh, 0Ah, "$"
+undo_id_prompt   DB 0Dh, 0Ah, "Enter Student ID to change status: $"
+undo_status_prompt DB 0Dh, 0Ah, "Select new status: [0] Absent, [1] Present, [2] Late: $"
+undo_invalid_id  DB 0Dh, 0Ah, "Invalid Student ID!", 0Dh, 0Ah, "$"
+undo_invalid_status DB 0Dh, 0Ah, "Invalid status! Please enter 0, 1, or 2.", 0Dh, 0Ah, "$"
 redo_success     DB 0Dh, 0Ah, "Redo Successful!", 0Dh, 0Ah, "$"
 redo_empty       DB 0Dh, 0Ah, "Nothing to Redo!", 0Dh, 0Ah, "$"
 reauth_prompt    DB "Enter password to confirm: $"
@@ -797,147 +801,85 @@ push_undo_stack ENDP
 
 ; ==================== UNDO ACTION (Feature 2) ====================
 undo_action PROC
-    CMP undo_stack_ptr, 0
-    JE undo_empty_stack
-    
-    ; Check buffer time
-    DEC undo_stack_ptr
-    XOR BH, BH
-    MOV BL, undo_stack_ptr
-    SHL BX, 1
-    MOV AX, undo_stack_time[BX]
-    SHR BX, 1
-    
-    PUSH BX
-    MOV BX, AX
-    MOV AH, 00h
-    INT 1Ah
-    SUB DX, BX
-    POP BX
-    
-    CMP DX, BUFFER_TIME
-    JA undo_needs_reauth
-    
-    JMP perform_undo
-
-undo_needs_reauth:
-    LEA DX, undo_expired
+    ; Prompt for student ID
+    LEA DX, undo_id_prompt
     MOV AH, 09h
     INT 21h
     
-    LEA DX, reauth_prompt
-    MOV AH, 09h
-    INT 21h
-    
-    ; Read password
-    LEA SI, input_pass
-    MOV CX, 0
-reauth_loop:
-    MOV AH, 01h
-    INT 21h
-    CMP AL, 0Dh
-    JE check_reauth
-    MOV [SI], AL
-    INC SI
-    INC CX
-    CMP CX, 6
-    JL reauth_loop
-
-check_reauth:
-    MOV BYTE PTR [SI], 0
-    
-    ; Verify password based on current teacher
-    CMP current_teacher, 1
-    JE verify_a
-    LEA DI, teacher_b_pass
-    JMP do_verify
-verify_a:
-    LEA DI, teacher_a_pass
-do_verify:
-    LEA SI, input_pass
-    CALL str_compare
-    CMP AX, 1
-    JNE reauth_failed
-    JMP perform_undo
-
-reauth_failed:
-    LEA DX, reauth_fail
-    MOV AH, 09h
-    INT 21h
-    INC undo_stack_ptr  ; Restore pointer
-    RET
-
-perform_undo:
-    ; Get student ID from undo stack using register
-    LEA SI, undo_stack_id
-    ADD SI, BX
-    MOV AL, [SI]
+    CALL read_number
     MOV temp_id, AL
     
-    ; Find student and get current status
+    ; Validate student ID
     CALL find_student_index
+    CMP BX, 0FFFFh
+    JE undo_invalid_student
+    
+    ; Get current status before changing
     MOV SI, current_status
     ADD SI, BX
-    MOV AH, [SI]        ; Current status for redo
+    MOV AH, [SI]        ; Current status for undo stack
     
-    ; Push to redo stack
-    PUSH BX
+    ; Save to undo stack before changing
     PUSH AX
-    XOR BH, BH
-    MOV BL, redo_stack_ptr
+    MOV AL, temp_id
+    CALL push_undo_stack
     POP AX
     
-    ; Store ID to redo stack
-    LEA DI, redo_stack_id
-    ADD DI, BX
-    MOV [DI], AL
+    ; Prompt for new status
+    LEA DX, undo_status_prompt
+    MOV AH, 09h
+    INT 21h
     
-    ; Store status to redo stack
-    LEA DI, redo_stack_stat
-    ADD DI, BX
-    MOV [DI], AH
+    ; Read status choice
+    MOV AH, 01h
+    INT 21h
     
-    INC redo_stack_ptr
-    POP BX
+    ; Validate status input
+    CMP AL, '0'
+    JE set_absent
+    CMP AL, '1'
+    JE set_present
+    CMP AL, '2'
+    JE set_late
     
-    ; Restore previous status from undo stack
-    PUSH BX
-    XOR BH, BH
-    MOV BL, undo_stack_ptr
-    
-    ; Get previous status
-    LEA SI, undo_stack_stat
-    ADD SI, BX
-    MOV AL, [SI]
-    
-    ; Get student ID
-    LEA SI, undo_stack_id
-    ADD SI, BX
-    MOV AH, [SI]
-    MOV temp_id, AH
-    POP BX
-    
-    PUSH AX
-    CALL find_student_index
-    POP AX
-    
-    ; Save current status before changing
+    ; Invalid status
+    LEA DX, undo_invalid_status
+    MOV AH, 09h
+    INT 21h
+    RET
+
+set_absent:
+    MOV AL, 0
+    JMP update_status
+
+set_present:
+    MOV AL, 1
+    JMP update_status
+
+set_late:
+    MOV AL, 2
+
+update_status:
+    ; Save current status for count update
     MOV SI, current_status
     ADD SI, BX
-    MOV AH, [SI]        ; Current status in AH
-    MOV [SI], AL        ; Restore previous status (AL)
+    MOV AH, [SI]        ; Old status in AH
+    MOV [SI], AL        ; New status in AL
     
     ; Update present/absent counts based on status change
-    ; AL = new status (previous), AH = old status (current)
+    ; AL = new status, AH = old status
     CMP AL, 0
-    JE undo_to_absent
+    JE new_status_absent
     ; New status is present (1) or late (2)
     CMP AH, 0
-    JE undo_from_absent_to_present
-    ; Was already present/late, no change needed
-    JMP undo_counts_done
+    JE change_to_present
+    ; Was already present/late, check if changing between present/late
+    CMP AL, AH
+    JE no_count_change
+    ; Changing between present and late, no count change needed
+    JMP no_count_change
 
-undo_from_absent_to_present:
+change_to_present:
     ; Was absent, now present/late - increment present, decrement absent
     MOV SI, current_present
     ADD SI, BX
@@ -945,12 +887,12 @@ undo_from_absent_to_present:
     MOV SI, current_absent
     ADD SI, BX
     DEC BYTE PTR [SI]
-    JMP undo_counts_done
+    JMP no_count_change
 
-undo_to_absent:
+new_status_absent:
     ; New status is absent
     CMP AH, 0
-    JE undo_counts_done  ; Was already absent, no change
+    JE no_count_change  ; Was already absent, no change
     ; Was present/late, now absent - decrement present, increment absent
     MOV SI, current_present
     ADD SI, BX
@@ -959,14 +901,14 @@ undo_to_absent:
     ADD SI, BX
     INC BYTE PTR [SI]
 
-undo_counts_done:
+no_count_change:
     LEA DX, undo_success
     MOV AH, 09h
     INT 21h
     RET
 
-undo_empty_stack:
-    LEA DX, undo_empty
+undo_invalid_student:
+    LEA DX, undo_invalid_id
     MOV AH, 09h
     INT 21h
     RET
