@@ -1,4 +1,3 @@
-
 ; filepath: f:\Poralekha\cse341\Smart-Classroom-Attendance-System\projectcode.asm
 .MODEL SMALL
 .STACK 100H
@@ -117,6 +116,9 @@ redo_success     DB 0Dh, 0Ah, "Redo Successful!", 0Dh, 0Ah, "$"
 redo_empty       DB 0Dh, 0Ah, "Nothing to Redo!", 0Dh, 0Ah, "$"
 reauth_prompt    DB "Enter password to confirm: $"
 reauth_fail      DB 0Dh, 0Ah, "Re-authentication failed! Action cancelled.", 0Dh, 0Ah, "$"
+logout_success_msg DB 0Dh, 0Ah, "Logout successful!", 0Dh, 0Ah, "$"
+logout_msg       DB 0Dh, 0Ah, "Please enter another teacher's password: $"
+logout_invalid   DB 0Dh, 0Ah, "Invalid Password! Please try again.", 0Dh, 0Ah, "$"
 
 ; Search Messages
 search_prompt    DB 0Dh, 0Ah, "Enter Student ID to search: $"
@@ -139,9 +141,11 @@ absent_days_lbl  DB "Absent on Days: $"
 ; Viva Messages
 viva_select_msg  DB 0Dh, 0Ah, "=== RANDOM VIVA SELECTION ===", 0Dh, 0Ah, "$"
 viva_no_present  DB "No students present for viva!", 0Dh, 0Ah, "$"
+viva_all_done    DB 0Dh, 0Ah, "All present students have viva marks!", 0Dh, 0Ah, "$"
 viva_selected    DB "Selected Student ID: $"
 viva_mark_prompt DB 0Dh, 0Ah, "Enter Viva Mark (0-10): $"
 viva_saved       DB 0Dh, 0Ah, "Viva mark saved!", 0Dh, 0Ah, "$"
+viva_another     DB 0Dh, 0Ah, "Do you want to select another student? (Y/N): $"
 manual_viva_id   DB 0Dh, 0Ah, "Enter Student ID for Viva Marks: $"
 viva_invalid_id  DB 0Dh, 0Ah, "Invalid Student ID! Please try again.", 0Dh, 0Ah, "$"
 
@@ -153,8 +157,8 @@ elig_pct_sym     DB "% | $"
 
 ; View All Messages
 view_header      DB 0Dh, 0Ah, "=== ALL STUDENTS STATUS ===", 0Dh, 0Ah
-                 DB "ID   | Status  | Present | Absent | Grade", 0Dh, 0Ah
-                 DB "----------------------------------------------", 0Dh, 0Ah, "$"
+                 DB "ID   | Status  | Present | Absent | Grade | AttM | VivaM | Total", 0Dh, 0Ah
+                 DB "----------------------------------------------------------------------", 0Dh, 0Ah, "$"
 
 ; Day Messages
 day_msg          DB 0Dh, 0Ah, "Current Day: $"
@@ -220,7 +224,7 @@ main_menu_loop:
     CMP AL, '9'
     JE do_next_day
     CMP AL, '0'
-    JE exit_program
+    JE logout_handler
     JMP main_menu_loop
 
 do_roll_call:
@@ -257,6 +261,81 @@ do_view_all:
 
 do_next_day:
     CALL advance_day
+    JMP main_menu_loop
+
+logout_handler:
+    ; Display logout success message
+    LEA DX, logout_success_msg
+    MOV AH, 09h
+    INT 21h
+
+logout_retry:
+    ; Display message asking for another teacher's password
+    LEA DX, logout_msg
+    MOV AH, 09h
+    INT 21h
+    
+    ; Read password
+    LEA SI, input_pass
+    MOV CX, 0
+    
+logout_read_pass:
+    MOV AH, 01h
+    INT 21h
+    CMP AL, 0Dh          ; Enter key
+    JE logout_check_password
+    MOV [SI], AL
+    INC SI
+    INC CX
+    CMP CX, 6
+    JL logout_read_pass
+
+logout_check_password:
+    MOV BYTE PTR [SI], 0  ; Null terminate
+    
+    ; Compare with Teacher A password
+    LEA SI, input_pass
+    LEA DI, teacher_a_pass
+    CALL str_compare
+    CMP AX, 1
+    JE logout_teacher_a
+    
+    ; Compare with Teacher B password
+    LEA SI, input_pass
+    LEA DI, teacher_b_pass
+    CALL str_compare
+    CMP AX, 1
+    JE logout_teacher_b
+    
+    ; Failed - show error and retry
+    LEA DX, logout_invalid
+    MOV AH, 09h
+    INT 21h
+    JMP logout_retry
+    
+logout_teacher_a:
+    MOV current_teacher, 1
+    LEA DX, login_success_a
+    MOV AH, 09h
+    INT 21h
+    JMP logout_success
+    
+logout_teacher_b:
+    MOV current_teacher, 2
+    LEA DX, login_success_b
+    MOV AH, 09h
+    INT 21h
+    
+logout_success:
+    ; Setup memory partition for new teacher
+    CALL setup_partition
+    
+    ; Get new session start time
+    MOV AH, 00h
+    INT 1Ah
+    MOV session_start, DX
+    
+    ; Continue to menu
     JMP main_menu_loop
 
 exit_program:
@@ -1469,7 +1548,8 @@ random_viva_select PROC
     MOV AH, 09h
     INT 21h
     
-    ; Build active pool of present students
+viva_loop:
+    ; Build active pool of present students WITHOUT viva marks
     MOV active_count, 0
     MOV CX, MAX_STUDENTS
     MOV BX, 0
@@ -1477,11 +1557,20 @@ random_viva_select PROC
     MOV SI, current_status
     
 build_pool:
+    ; Check if student is present (status != 0)
     MOV AL, [SI+BX]
-    CMP AL, 0           ; Not absent
+    CMP AL, 0           ; Absent
     JE skip_pool
     
-    ; Add to pool
+    ; Check if viva mark is not given yet (viva mark == 0)
+    PUSH SI
+    MOV SI, current_viva
+    MOV AL, [SI+BX]
+    CMP AL, 0           ; Viva mark not given
+    POP SI
+    JNE skip_pool       ; Skip if viva mark already given
+    
+    ; Add to pool (student is present AND viva mark not given)
     PUSH SI
     MOV SI, current_ids
     MOV AL, [SI+BX]
@@ -1499,9 +1588,9 @@ skip_pool:
     INC BX
     LOOP build_pool
     
-    ; Check if any present
+    ; Check if any students available for viva
     CMP active_count, 0
-    JE no_present_students
+    JE no_available_students
     
     ; Get random using timer
     MOV AH, 00h
@@ -1533,6 +1622,31 @@ skip_pool:
     
     ; Prompt for viva mark
     CALL input_viva_mark
+    
+    ; Ask if teacher wants to select another student
+    LEA DX, viva_another
+    MOV AH, 09h
+    INT 21h
+    
+    ; Read character
+    MOV AH, 01h
+    INT 21h
+    
+    ; If 'Y' or 'y', continue loop to select another student
+    CMP AL, 'Y'
+    JE viva_loop
+    CMP AL, 'y'
+    JE viva_loop
+    
+    ; Any other key (including 'N', 'n', or anything else), return to menu
+    RET
+
+no_available_students:
+    ; Check if we're in the loop (after at least one viva mark entered)
+    ; If active_count is 0 in the loop, all students have viva marks
+    LEA DX, viva_all_done
+    MOV AH, 09h
+    INT 21h
     RET
 
 no_present_students:
@@ -1702,6 +1816,60 @@ view_g_dc:
 view_print_grade:
     MOV AH, 02h
     INT 21h
+    
+    LEA DX, space_str
+    MOV AH, 09h
+    INT 21h
+    LEA DX, pipe_str
+    MOV AH, 09h
+    INT 21h
+    
+    ; Calculate and display Attendance Marks based on grade
+    MOV SI, current_grades
+    MOV AL, [SI+BX]
+    CMP AL, 3          ; Discollegiate
+    JE att_mark_0
+    CMP AL, 1          ; Collegiate
+    JE att_mark_5
+    ; Middle (Non-Collegiate)
+    MOV AL, 4
+    JMP att_mark_done
+att_mark_0:
+    MOV AL, 0
+    JMP att_mark_done
+att_mark_5:
+    MOV AL, 5
+att_mark_done:
+    PUSH AX            ; Save attendance mark for total calculation
+    CALL print_number
+    
+    LEA DX, space_str
+    MOV AH, 09h
+    INT 21h
+    LEA DX, pipe_str
+    MOV AH, 09h
+    INT 21h
+    
+    ; Display Viva Marks
+    MOV SI, current_viva
+    MOV AL, [SI+BX]
+    PUSH AX            ; Save viva mark for total calculation
+    CALL print_number
+    
+    LEA DX, space_str
+    MOV AH, 09h
+    INT 21h
+    LEA DX, pipe_str
+    MOV AH, 09h
+    INT 21h
+    
+    ; Calculate and display Total (Attendance + Viva)
+    POP DX             ; Get viva mark (last pushed)
+    XOR DH, DH         ; Clear upper byte
+    POP AX             ; Get attendance mark (first pushed)
+    XOR AH, AH         ; Clear upper byte
+    ADD AL, DL         ; Add viva to attendance
+    CALL print_number
     
     LEA DX, newline
     MOV AH, 09h
