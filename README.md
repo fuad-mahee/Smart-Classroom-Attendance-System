@@ -54,10 +54,12 @@ The Smart Classroom Attendance System is an x86 Assembly project designed to aut
 
 ## File Structure
 - `projectcode.asm` — Main source code for the attendance system
-- `previousproject.txt` — Reference code for timer logic (optional)
+
 
 ## Authors
-- [Your Team Name or Member Names Here]
+- Muftasim Fuad Mahee
+- Nabil Thahamid Chowdhury
+- Mohammed Ahnaf
 
 ## License
 This project is for educational purposes. Please credit the authors if reusing or modifying the code.
